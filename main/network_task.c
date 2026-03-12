@@ -1,26 +1,29 @@
 #include "network_task.h"
 #include "protocol.h"
+#include "wifi_manager.h"
 
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/event_groups.h"
 #include "lwip/sockets.h"
 #include "esp_log.h"
 
 #define TAG "NET"
+#define RECV_TIMEOUT_SEC 2
 
 extern QueueHandle_t hid_event_queue;
 
-void network_task(void *pvParameters)
+static int create_udp_socket(void)
 {
-    (void)pvParameters;
-
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (sock < 0) {
         ESP_LOGE(TAG, "Failed to create socket: errno %d", errno);
-        vTaskDelete(NULL);
-        return;
+        return -1;
     }
+
+    struct timeval tv = { .tv_sec = RECV_TIMEOUT_SEC, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     struct sockaddr_in addr = {
         .sin_family      = AF_INET,
@@ -31,17 +34,50 @@ void network_task(void *pvParameters)
     if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         ESP_LOGE(TAG, "Failed to bind socket: errno %d", errno);
         close(sock);
-        vTaskDelete(NULL);
-        return;
+        return -1;
     }
 
-    ESP_LOGI(TAG, "Listening on UDP port %d", UDP_PORT);
+    return sock;
+}
 
+void network_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    int sock = -1;
     uint32_t last_seq = 0;
     udp_packet_t pkt;
 
     while (1) {
+        // Wait for WiFi to be connected before opening socket
+        if (sock < 0) {
+            ESP_LOGI(TAG, "Waiting for WiFi connection...");
+            xEventGroupWaitBits(wifi_event_group,
+                WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+
+            sock = create_udp_socket();
+            if (sock < 0) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+            ESP_LOGI(TAG, "Listening on UDP port %d", UDP_PORT);
+        }
+
+        // Check if WiFi disconnected — close socket and re-create on reconnect
+        EventBits_t bits = xEventGroupGetBits(wifi_event_group);
+        if (!(bits & WIFI_CONNECTED_BIT)) {
+            ESP_LOGW(TAG, "WiFi lost, closing socket");
+            close(sock);
+            sock = -1;
+            continue;
+        }
+
         int len = recvfrom(sock, &pkt, sizeof(pkt), 0, NULL, NULL);
+
+        if (len < 0) {
+            // Timeout or error — loop back to check WiFi state
+            continue;
+        }
 
         if (len != PACKET_SIZE)            continue;
         if (pkt.magic != PACKET_MAGIC)     continue;
