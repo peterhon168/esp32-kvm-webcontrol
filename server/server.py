@@ -26,6 +26,8 @@ def main():
                         help=f"UDP port (default: {UDP_PORT})")
     parser.add_argument("--rate", type=int, default=125,
                         help="Polling rate in Hz (default: 125)")
+    parser.add_argument("--jiggle", action="store_true",
+                        help="Enable invisible mouse jiggler to prevent PC from sleeping")
     args = parser.parse_args()
 
     if not (60 <= args.rate <= 1000):
@@ -38,7 +40,7 @@ def main():
     print("[INIT] Starting sender thread...")
     sender = threading.Thread(
         target=sender_thread,
-        args=(args.host, args.port, args.rate, stop_event, state),
+        args=(args.host, args.port, args.rate, stop_event, state, args.jiggle),
         daemon=True,
     )
     sender.start()

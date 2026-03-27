@@ -5,13 +5,17 @@ import time
 from protocol import pack_keyboard, pack_mouse, pack_consumer
 from state import InputState
 
-def sender_thread(host: str, port: int, rate: int, stop_event: threading.Event, state: InputState):
+def sender_thread(host: str, port: int, rate: int, stop_event: threading.Event, state: InputState, jiggle: bool = False):
     """Thread that sends UDP packets to ESP32 at a fixed rate."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     target = (host, port)
     interval = 1.0 / rate
 
     print(f"[SENDER] Target: {host}:{port} @ {rate}Hz (interval {interval*1000:.1f}ms)")
+    if jiggle:
+        print("[SENDER] Jiggler enabled")
+
+    jiggle_tick = 0
 
     while not stop_event.is_set():
         t0 = time.perf_counter()
@@ -65,12 +69,21 @@ def sender_thread(host: str, port: int, rate: int, stop_event: threading.Event, 
                 wheel = max(-127, min(127, wheel))
                 pan = max(-127, min(127, pan))
 
+            # ── Jiggler ─────────────────────────────────────────
+            send_jiggle = False
+            if jiggle:
+                jiggle_tick += 1
+                if jiggle_tick >= 25:
+                    jiggle_tick = 0
+                    send_jiggle = True
+
             # ── Sending ─────────────────────────────────────────
             if active:
                 if mouse_changed:
                     seq = state.next_seq()
                     pkt = pack_mouse(seq, buttons, dx, dy, wheel, pan)
                     sock.sendto(pkt, target)
+                    send_jiggle = False
 
                 if kbd_dirty:
                     seq = state.next_seq()
@@ -124,6 +137,11 @@ def sender_thread(host: str, port: int, rate: int, stop_event: threading.Event, 
                     seq = state.next_seq()
                     pkt = pack_consumer(seq, consumer_usage)
                     sock.sendto(pkt, target)
+
+            if send_jiggle:
+                seq = state.next_seq()
+                pkt = pack_mouse(seq, state.mouse_buttons, 0, 0, 0, 0)
+                sock.sendto(pkt, target)
 
         # Precise timing (busy-wait for the last µs)
         elapsed = time.perf_counter() - t0
