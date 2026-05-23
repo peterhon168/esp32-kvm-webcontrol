@@ -56,6 +56,9 @@ __pycache__/
 *.egg-info/
 dist/
 
+# KVM bridge — local config contains IP addresses, do not commit
+tools/kvm_bridge/config.env
+
 # Virtual environment folders
 venv/
 .venv/

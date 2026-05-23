@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ESP32 KVM</title>
+<style>
+/* ── Reset & base ─────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:      #0d1117;
+  --bg2:     #161b22;
+  --bg3:     #21262d;
+  --border:  #30363d;
+  --accent:  #58a6ff;
+  --red:     #f85149;
+  --green:   #3fb950;
+  --text:    #c9d1d9;
+  --muted:   #8b949e;
+}
+body {
+  background: var(--bg); color: var(--text);
+  font: 12px/1.4 'Consolas', 'Menlo', monospace;
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+}
+
+/* ── Toolbar ──────────────────────────────────────────────────── */
+#toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px; background: var(--bg2);
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+#toolbar h1 { font-size: 13px; color: var(--accent); white-space: nowrap; }
+#ws-status {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  background: var(--bg3); white-space: nowrap;
+}
+#ws-status.ok  { color: var(--green); }
+#ws-status.err { color: var(--red);   }
+#ws-url {
+  flex: 1; min-width: 0;
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); padding: 3px 7px; border-radius: 4px; font-size: 11px;
+}
+.btn {
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); padding: 3px 10px; border-radius: 4px;
+  cursor: pointer; font-size: 11px; white-space: nowrap;
+}
+.btn:hover  { border-color: var(--accent); color: var(--accent); }
+.btn:active { background: var(--bg2); }
+.btn:disabled { opacity: .4; cursor: default; pointer-events: none; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #000; }
+.btn.primary:hover { opacity: .85; }
+
+/* ── Main layout ──────────────────────────────────────────────── */
+#main { display: flex; flex: 1; overflow: hidden; }
+
+/* ── Video panel ──────────────────────────────────────────────── */
+#video-wrap {
+  flex: 1; position: relative; background: #000;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+#video-stream {
+  max-width: 100%; max-height: 100%;
+  display: block; pointer-events: none;
+}
+#video-msg {
+  position: absolute; color: var(--muted); text-align: center;
+  font-size: 13px; line-height: 2;
+}
+/* Invisible overlay that captures all input */
+#overlay {
+  position: absolute; inset: 0;
+  outline: none; user-select: none;
+  cursor: crosshair;
+}
+#overlay.locked { cursor: none; }
+
+/* ── Click-to-lock splash — shown whenever mouse is NOT locked ── */
+#click-to-lock {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 12px;
+  background: rgba(0, 0, 0, .55);
+  backdrop-filter: blur(2px);
+  cursor: pointer;
+  transition: opacity .2s;
+  z-index: 10;                /* above overlay so click reaches it */
+}
+#click-to-lock.hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+#click-to-lock .ctl-icon {
+  font-size: 48px; line-height: 1;
+  filter: drop-shadow(0 2px 8px rgba(0,0,0,.8));
+}
+#click-to-lock .ctl-title {
+  font-size: 18px; font-weight: bold; color: #fff;
+  text-shadow: 0 1px 4px rgba(0,0,0,.9);
+}
+#click-to-lock .ctl-sub {
+  font-size: 11px; color: rgba(255,255,255,.6);
+  text-align: center; line-height: 1.8;
+}
+#click-to-lock .ctl-badge {
+  display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
+}
+#click-to-lock .ctl-key {
+  background: rgba(255,255,255,.15); border: 1px solid rgba(255,255,255,.3);
+  color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 11px;
+  font-family: inherit;
+}
+/* Pulsing ring animation on the icon when WS is connected */
+@keyframes pulse-ring {
+  0%   { box-shadow: 0 0 0 0   rgba(88,166,255,.6); }
+  70%  { box-shadow: 0 0 0 14px rgba(88,166,255,0);  }
+  100% { box-shadow: 0 0 0 0   rgba(88,166,255,0);   }
+}
+#click-to-lock.ws-ready .ctl-icon-wrap {
+  border-radius: 50%; animation: pulse-ring 2s ease-out infinite;
+}
+
+/* Locked state: tiny escape reminder at bottom */
+#esc-hint {
+  position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%);
+  background: rgba(0,0,0,.65); color: rgba(255,255,255,.45);
+  padding: 2px 10px; border-radius: 10px; font-size: 10px;
+  pointer-events: none; opacity: 0; transition: opacity .3s;
+  white-space: nowrap; z-index: 5;
+}
+#esc-hint.show { opacity: 1; }
+
+/* ── Sidebar ──────────────────────────────────────────────────── */
+#sidebar {
+  width: 210px; flex-shrink: 0;
+  background: var(--bg2); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+.panel { padding: 8px; border-bottom: 1px solid var(--border); }
+.panel-title {
+  font-size: 10px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .05em; margin-bottom: 6px;
+}
+.panel input[type=text], .panel textarea {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); padding: 3px 6px; border-radius: 4px;
+  font: inherit; margin-bottom: 4px;
+}
+.panel input[type=text]:focus, .panel textarea:focus {
+  outline: none; border-color: var(--accent);
+}
+.panel textarea { height: 56px; resize: vertical; }
+
+/* Key grid */
+.kgrid { display: flex; flex-wrap: wrap; gap: 3px; }
+.k {
+  background: var(--bg3); border: 1px solid var(--border);
+  color: var(--text); padding: 2px 5px; border-radius: 3px;
+  cursor: pointer; font: 10px/1.6 inherit; min-width: 28px; text-align: center;
+}
+.k:hover  { border-color: var(--accent); color: var(--accent); }
+.k:active { background: var(--bg); }
+.k.wide   { min-width: 56px; }
+.k.xwide  { min-width: 84px; }
+
+/* Log */
+#log {
+  font-size: 10px; color: var(--muted);
+  height: 90px; overflow-y: auto;
+  background: var(--bg); padding: 4px; border-radius: 3px;
+  line-height: 1.5;
+}
+#log .err { color: var(--red); }
+#log .ok  { color: var(--green); }
+</style>
+</head>
+<body>
+
+<!-- ── Toolbar ─────────────────────────────────────────────────── -->
+<div id="toolbar">
+  <h1>⌨ ESP32 KVM</h1>
+  <span id="ws-status" class="err">● 未连接</span>
+  <input id="ws-url" type="text" placeholder="ws://192.168.1.x:8765" spellcheck="false">
+  <button class="btn primary" id="btn-connect">连接</button>
+  <button class="btn" id="btn-lock" disabled>🔒 锁定鼠标</button>
+</div>
+
+<!-- ── Main ────────────────────────────────────────────────────── -->
+<div id="main">
+
+  <!-- Video -->
+  <div id="video-wrap">
+    <img id="video-stream" alt="" style="display:none">
+    <div id="video-msg">
+      视频流未加载<br>
+      <span style="font-size:10px;color:var(--muted)">在右侧填写 uStreamer 地址后点击「加载」</span>
+    </div>
+
+    <!-- Click-to-lock splash (always visible until pointer is locked) -->
+    <div id="click-to-lock" onclick="doLock()">
+      <div class="ctl-icon-wrap">
+        <div class="ctl-icon">🖱</div>
+      </div>
+      <div class="ctl-title">点击此处控制鼠标</div>
+      <div class="ctl-sub">
+        点击后鼠标将被锁定到此区域<br>
+        键盘输入也将转发到目标机
+      </div>
+      <div class="ctl-badge">
+        <span class="ctl-key">ESC</span>
+        <span style="font-size:10px;color:rgba(255,255,255,.5);align-self:center">解锁鼠标</span>
+        <span class="ctl-key">Alt+L</span>
+        <span style="font-size:10px;color:rgba(255,255,255,.5);align-self:center">切换锁定</span>
+      </div>
+      <div id="ctl-ws-warn" style="font-size:10px;color:var(--red);display:none">
+        ⚠ 请先连接 WebSocket
+      </div>
+    </div>
+
+    <!-- Invisible input capture overlay (behind the splash, active when locked) -->
+    <div id="overlay" tabindex="0"></div>
+
+    <!-- Locked-state reminder -->
+    <div id="esc-hint">ESC 解锁 · Alt+L 切换</div>
+  </div>
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+
+    <!-- Video source -->
+    <div class="panel">
+      <div class="panel-title">视频流</div>
+      <input type="text" id="stream-url" placeholder="http://vm-ip:8080/stream" spellcheck="false">
+      <button class="btn" style="width:100%" onclick="loadStream()">加载</button>
+    </div>
+
+    <!-- Function keys -->
+    <div class="panel">
+      <div class="panel-title">功能键</div>
+      <div class="kgrid">
+        <span class="k" onclick="tap(0x29)">Esc</span>
+        <span class="k" onclick="tap(0x3A)">F1</span>
+        <span class="k" onclick="tap(0x3B)">F2</span>
+        <span class="k" onclick="tap(0x3C)">F3</span>
+        <span class="k" onclick="tap(0x3D)">F4</span>
+        <span class="k" onclick="tap(0x3E)">F5</span>
+        <span class="k" onclick="tap(0x3F)">F6</span>
+        <span class="k" onclick="tap(0x40)">F7</span>
+        <span class="k" onclick="tap(0x41)">F8</span>
+        <span class="k" onclick="tap(0x42)">F9</span>
+        <span class="k" onclick="tap(0x43)">F10</span>
+        <span class="k" onclick="tap(0x44)">F11</span>
+        <span class="k" onclick="tap(0x45)">F12</span>
+        <span class="k" onclick="tap(0x46)">PrtSc</span>
+        <span class="k" onclick="tap(0x47)">ScrLk</span>
+        <span class="k" onclick="tap(0x48)">Pause</span>
+      </div>
+    </div>
+
+    <!-- Nav keys -->
+    <div class="panel">
+      <div class="panel-title">导航键</div>
+      <div class="kgrid">
+        <span class="k" onclick="tap(0x49)">Ins</span>
+        <span class="k" onclick="tap(0x4A)">Home</span>
+        <span class="k" onclick="tap(0x4B)">PgUp</span>
+        <span class="k" onclick="tap(0x4C)">Del</span>
+        <span class="k" onclick="tap(0x4D)">End</span>
+        <span class="k" onclick="tap(0x4E)">PgDn</span>
+        <span class="k" onclick="tap(0x52)">↑</span>
+        <span class="k" onclick="tap(0x50)">←</span>
+        <span class="k" onclick="tap(0x51)">↓</span>
+        <span class="k" onclick="tap(0x4F)">→</span>
+      </div>
+    </div>
+
+    <!-- Combos -->
+    <div class="panel">
+      <div class="panel-title">组合键</div>
+      <div class="kgrid">
+        <span class="k xwide" onclick="combo(0x05,0x4C)">Ctrl+Alt+Del</span>
+        <span class="k xwide" onclick="combo(0x05,0x28)">Ctrl+Alt+Enter</span>
+        <span class="k wide"  onclick="combo(0x04,0x3D)">Alt+F4</span>
+        <span class="k wide"  onclick="combo(0x01,0x29)">Ctrl+Esc</span>
+        <span class="k wide"  onclick="combo(0x08,0x00)">Win</span>
+        <span class="k wide"  onclick="combo(0x01,0x2C)">Ctrl+Space</span>
+        <span class="k wide"  onclick="combo(0x01,0x16)">Ctrl+S</span>
+        <span class="k wide"  onclick="combo(0x01,0x06)">Ctrl+C</span>
+        <span class="k wide"  onclick="combo(0x01,0x19)">Ctrl+V</span>
+        <span class="k wide"  onclick="combo(0x01,0x1D)">Ctrl+Z</span>
+      </div>
+    </div>
+
+    <!-- Text paste -->
+    <div class="panel">
+      <div class="panel-title">文本粘贴</div>
+      <textarea id="paste-buf" placeholder="输入要发送的文本…"></textarea>
+      <button class="btn" style="width:100%" onclick="pasteText()">发送文本</button>
+    </div>
+
+    <!-- Log -->
+    <div class="panel" style="flex:1">
+      <div class="panel-title">日志</div>
+      <div id="log"></div>
+    </div>
+
+  </div><!-- /sidebar -->
+</div><!-- /main -->
+
+<script>
+"use strict";
+
+// ── Config (fetched from server, with fallback) ───────────────────
+let CFG = { ws_url: `ws://${location.hostname}:8765`, stream_url: "" };
+
+fetch("/config.json")
+  .then(r => r.json())
+  .then(c => {
+    CFG = { ...CFG, ...c };
+    document.getElementById("ws-url").value    = CFG.ws_url;
+    document.getElementById("stream-url").value = CFG.stream_url;
+  })
+  .catch(() => {
+    document.getElementById("ws-url").value = CFG.ws_url;
+  });
+
+// ── Logging ───────────────────────────────────────────────────────
+const logEl = document.getElementById("log");
+function uiLog(msg, cls = "") {
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = `${new Date().toLocaleTimeString("zh")} ${msg}`;
+  logEl.prepend(d);
+  while (logEl.children.length > 80) logEl.removeChild(logEl.lastChild);
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────
+let ws = null;
+const wsStatus  = document.getElementById("ws-status");
+const btnConn   = document.getElementById("btn-connect");
+const btnLock   = document.getElementById("btn-lock");
+
+function wsConnect() {
+  const url = document.getElementById("ws-url").value.trim();
+  if (!url) return;
+  if (ws) { ws.close(); return; }
+
+  ws = new WebSocket(url);
+
+  ws.onopen = () => {
+    wsStatus.textContent = "● 已连接";
+    wsStatus.className   = "ok";
+    btnConn.textContent  = "断开";
+    btnLock.disabled     = false;
+    updateSplashState();
+    uiLog(`已连接 ${url}`, "ok");
+  };
+  ws.onclose = () => {
+    wsStatus.textContent = "● 未连接";
+    wsStatus.className   = "err";
+    btnConn.textContent  = "连接";
+    btnLock.disabled     = true;
+    ws = null;
+    updateSplashState();
+    uiLog("连接断开");
+    // Release all inputs on disconnect
+    releaseAll();
+  };
+  ws.onerror = () => uiLog("WebSocket 错误", "err");
+}
+
+btnConn.onclick = wsConnect;
+
+function wsSend(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify(obj));
+}
+
+// ── Video stream ──────────────────────────────────────────────────
+const videoEl = document.getElementById("video-stream");
+const videoMsg = document.getElementById("video-msg");
+
+function loadStream() {
+  const url = document.getElementById("stream-url").value.trim();
+  if (!url) return;
+  videoEl.onload  = () => { videoMsg.style.display = "none"; };
+  videoEl.onerror = () => { uiLog(`视频加载失败: ${url}`, "err"); };
+  videoEl.src = url;
+  videoEl.style.display = "block";
+  uiLog(`加载视频: ${url}`);
+}
+
+// ── Pointer Lock ──────────────────────────────────────────────────
+const overlay   = document.getElementById("overlay");
+const splash    = document.getElementById("click-to-lock");
+const escHint   = document.getElementById("esc-hint");
+const ctlWsWarn = document.getElementById("ctl-ws-warn");
+
+// doLock() is called by clicking the splash — this IS a user gesture,
+// so requestPointerLock() is guaranteed to work here.
+function doLock() {
+  if (!ws) {
+    ctlWsWarn.style.display = "block";
+    setTimeout(() => { ctlWsWarn.style.display = "none"; }, 2500);
+    uiLog("请先连接 WebSocket 再锁定鼠标", "err");
+    return;
+  }
+  overlay.focus();
+  overlay.requestPointerLock();
+}
+
+// Keep splash pulsing when WS is connected
+function updateSplashState() {
+  splash.classList.toggle("ws-ready", !!ws);
+}
+
+document.addEventListener("pointerlockchange", () => {
+  const locked = document.pointerLockElement === overlay;
+  overlay.classList.toggle("locked", locked);
+  btnLock.textContent = locked ? "🔓 解锁 (ESC)" : "🔒 锁定鼠标";
+
+  // Show/hide splash and escape hint
+  splash.classList.toggle("hidden", locked);
+  escHint.classList.toggle("show", locked);
+
+  if (!locked) releaseAll();
+  uiLog(locked ? "鼠标已锁定 — ESC 解锁" : "鼠标已解锁");
+});
+
+// Toolbar lock button also works (user gesture ✓)
+btnLock.onclick = () => {
+  if (document.pointerLockElement) document.exitPointerLock();
+  else doLock();
+};
+
+// ── Mouse ─────────────────────────────────────────────────────────
+// HID button bits: bit0=Left bit1=Right bit2=Middle bit3=Back bit4=Forward
+// Browser e.button: 0=Left 1=Middle 2=Right 3=Back 4=Forward
+const BTN_MAP = [0x01, 0x04, 0x02, 0x08, 0x10];
+let mouseButtons = 0;
+
+overlay.addEventListener("mousemove", e => {
+  if (!document.pointerLockElement) return;
+  wsSend({ type:"mouse", buttons:mouseButtons,
+           dx:e.movementX, dy:e.movementY, wheel:0, pan:0 });
+});
+
+overlay.addEventListener("mousedown", e => {
+  e.preventDefault();
+  mouseButtons |= (BTN_MAP[e.button] ?? 0);
+  wsSend({ type:"mouse", buttons:mouseButtons, dx:0, dy:0, wheel:0, pan:0 });
+});
+
+overlay.addEventListener("mouseup", e => {
+  e.preventDefault();
+  mouseButtons &= ~(BTN_MAP[e.button] ?? 0);
+  wsSend({ type:"mouse", buttons:mouseButtons, dx:0, dy:0, wheel:0, pan:0 });
+});
+
+overlay.addEventListener("wheel", e => {
+  e.preventDefault();
+  // Normalise: most mice send deltaY in multiples of 100 (pixels) or 3 (lines)
+  const scale = e.deltaMode === 0 ? 1/40 : 1;  // pixel mode vs line mode
+  const wheel = Math.round(-e.deltaY * scale);
+  const pan   = Math.round(-e.deltaX * scale);
+  wsSend({ type:"mouse", buttons:mouseButtons, dx:0, dy:0,
+           wheel: clamp(wheel,-127,127), pan: clamp(pan,-127,127) });
+}, { passive: false });
+
+overlay.addEventListener("contextmenu", e => e.preventDefault());
+
+// ── Keyboard ──────────────────────────────────────────────────────
+// Browser KeyboardEvent.code → HID Usage ID (USB HID Usage Tables §10)
+const KEY_MAP = {
+  Escape:0x29, F1:0x3A, F2:0x3B, F3:0x3C, F4:0x3D, F5:0x3E, F6:0x3F,
+  F7:0x40, F8:0x41, F9:0x42, F10:0x43, F11:0x44, F12:0x45,
+  PrintScreen:0x46, ScrollLock:0x47, Pause:0x48,
+  Backquote:0x35,
+  Digit1:0x1E, Digit2:0x1F, Digit3:0x20, Digit4:0x21, Digit5:0x22,
+  Digit6:0x23, Digit7:0x24, Digit8:0x25, Digit9:0x26, Digit0:0x27,
+  Minus:0x2D, Equal:0x2E, Backspace:0x2A,
+  Tab:0x2B,
+  KeyQ:0x14, KeyW:0x1A, KeyE:0x08, KeyR:0x15, KeyT:0x17,
+  KeyY:0x1C, KeyU:0x18, KeyI:0x0C, KeyO:0x12, KeyP:0x13,
+  BracketLeft:0x2F, BracketRight:0x30, Backslash:0x31,
+  CapsLock:0x39,
+  KeyA:0x04, KeyS:0x16, KeyD:0x07, KeyF:0x09, KeyG:0x0A,
+  KeyH:0x0B, KeyJ:0x0D, KeyK:0x0E, KeyL:0x0F,
+  Semicolon:0x33, Quote:0x34, Enter:0x28,
+  KeyZ:0x1D, KeyX:0x1B, KeyC:0x06, KeyV:0x19, KeyB:0x05,
+  KeyN:0x11, KeyM:0x10, Comma:0x36, Period:0x37, Slash:0x38,
+  Space:0x2C,
+  Insert:0x49, Home:0x4A, PageUp:0x4B,
+  Delete:0x4C, End:0x4D,  PageDown:0x4E,
+  ArrowUp:0x52, ArrowLeft:0x50, ArrowDown:0x51, ArrowRight:0x4F,
+  NumLock:0x53, NumpadDivide:0x54, NumpadMultiply:0x55, NumpadSubtract:0x56,
+  Numpad7:0x5F, Numpad8:0x60, Numpad9:0x61, NumpadAdd:0x57,
+  Numpad4:0x5C, Numpad5:0x5D, Numpad6:0x5E,
+  Numpad1:0x59, Numpad2:0x5A, Numpad3:0x5B, NumpadEnter:0x58,
+  Numpad0:0x62, NumpadDecimal:0x63,
+};
+
+// Modifier keys → bit positions in HID modifier byte
+// bit0=LCtrl bit1=LShift bit2=LAlt bit3=LGUI bit4=RCtrl bit5=RShift bit6=RAlt bit7=RGUI
+const MOD_MAP = {
+  ControlLeft:0x01, ShiftLeft:0x02, AltLeft:0x04, MetaLeft:0x08,
+  ControlRight:0x10, ShiftRight:0x20, AltRight:0x40, MetaRight:0x80,
+};
+
+const pressedKeys = new Set();   // HID keycodes currently held
+let   modifiers   = 0;           // current modifier byte
+
+function sendKeys() {
+  wsSend({ type:"keyboard", modifiers, keycodes:[...pressedKeys].slice(0,6) });
+}
+
+overlay.addEventListener("keydown", e => {
+  e.preventDefault();
+  e.stopPropagation();
+
+  // Alt+L = toggle pointer lock (convenience shortcut)
+  if (e.code === "KeyL" && e.altKey) {
+    if (document.pointerLockElement) document.exitPointerLock();
+    else overlay.requestPointerLock();
+    return;
+  }
+
+  const mod = MOD_MAP[e.code];
+  if (mod) { modifiers |= mod; sendKeys(); return; }
+
+  const hid = KEY_MAP[e.code];
+  if (hid) { pressedKeys.add(hid); sendKeys(); }
+});
+
+overlay.addEventListener("keyup", e => {
+  e.preventDefault();
+  const mod = MOD_MAP[e.code];
+  if (mod) { modifiers &= ~mod; sendKeys(); return; }
+  const hid = KEY_MAP[e.code];
+  if (hid) { pressedKeys.delete(hid); sendKeys(); }
+});
+
+function releaseAll() {
+  pressedKeys.clear();
+  modifiers   = 0;
+  mouseButtons = 0;
+  wsSend({ type:"keyboard", modifiers:0, keycodes:[] });
+  wsSend({ type:"mouse", buttons:0, dx:0, dy:0, wheel:0, pan:0 });
+}
+
+// ── Sidebar shortcut helpers ──────────────────────────────────────
+function tap(keycode) {
+  wsSend({ type:"keyboard", modifiers:0, keycodes:[keycode] });
+  setTimeout(() => wsSend({ type:"keyboard", modifiers:0, keycodes:[] }), 60);
+}
+
+function combo(mod, keycode) {
+  const keys = keycode ? [keycode] : [];
+  wsSend({ type:"keyboard", modifiers:mod, keycodes:keys });
+  setTimeout(() => wsSend({ type:"keyboard", modifiers:0, keycodes:[] }), 60);
+}
+
+// ── Text paste ────────────────────────────────────────────────────
+// ASCII char → [modifiers, HID keycode]
+const CHAR_TABLE = (() => {
+  const t = {};
+  const plain = "`1234567890-=[]\\;',./";
+  const codes = [0x35,0x1E,0x1F,0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27,
+                 0x2D,0x2E,0x2F,0x30,0x31,0x33,0x34,0x36,0x37,0x38];
+  plain.split("").forEach((c,i) => t[c] = [0, codes[i]]);
+
+  const shifted = '~!@#$%^&*()_+{}|:"<>?';
+  shifted.split("").forEach((c,i) => t[c] = [0x02, codes[i]]);
+
+  "abcdefghijklmnopqrstuvwxyz".split("").forEach((c,i) => t[c] = [0, 0x04+i]);
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("").forEach((c,i) => t[c] = [0x02, 0x04+i]);
+
+  t[" "]  = [0, 0x2C];
+  t["\t"] = [0, 0x2B];
+  t["\n"] = [0, 0x28];
+  return t;
+})();
+
+async function pasteText() {
+  const text = document.getElementById("paste-buf").value;
+  let sent = 0;
+  for (const ch of text) {
+    const entry = CHAR_TABLE[ch];
+    if (!entry) continue;
+    const [mod, kc] = entry;
+    wsSend({ type:"keyboard", modifiers:mod, keycodes:[kc] });
+    await delay(30);
+    wsSend({ type:"keyboard", modifiers:0, keycodes:[] });
+    await delay(20);
+    sent++;
+  }
+  uiLog(`已发送 ${sent} 个字符`);
+}
+
+// ── Utilities ─────────────────────────────────────────────────────
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+</script>
+</body>
+</html>

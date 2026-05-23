@@ -19,6 +19,15 @@ static int s_retry_num = 0;
 static esp_netif_t *s_sta_netif = NULL;
 static bool s_fast_connect = false;
 
+// Reconnect task — runs outside the WiFi event loop to avoid blocking it
+static void reconnect_task(void *arg)
+{
+    int delay_ms = (int)(intptr_t)arg;
+    vTaskDelay(pdMS_TO_TICKS(delay_ms));
+    esp_wifi_connect();
+    vTaskDelete(NULL);
+}
+
 // ── NVS helpers ──────────────────────────────────────────────────
 
 typedef struct {
@@ -95,8 +104,9 @@ static void event_handler(void *arg, esp_event_base_t event_base,
         int delay_ms = (s_retry_num < 10) ? (s_retry_num * 1000) : 10000;
         ESP_LOGW(TAG, "Disconnected. Reconnecting in %d ms (attempt %d)...",
                  delay_ms, s_retry_num);
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-        esp_wifi_connect();
+        // Reconnect from a separate task to avoid blocking the WiFi event loop
+        xTaskCreate(reconnect_task, "wifi_reconnect", 2048,
+                    (void *)(intptr_t)delay_ms, 5, NULL);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
@@ -177,8 +187,7 @@ esp_err_t wifi_manager_init(const char *ssid, const char *password)
     wifi_config_t wifi_config = { 0 };
     strlcpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
     strlcpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_WPA3_PSK;
-    wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
 
     // Try fast reconnect using cached BSSID + channel + static IP
     wifi_cache_t cache;
